@@ -101,6 +101,29 @@
         outline: none;
         border-color: #6c5ce7;
       }
+      .api-key-actions {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .btn-api-key {
+        width: auto;
+        flex: 1;
+        padding: 9px 12px;
+        font-size: 12px;
+      }
+      .btn-api-key.secondary {
+        background: #2f3542;
+      }
+      .api-key-status {
+        font-size: 11px;
+        color: #b2bec3;
+        line-height: 1.4;
+        margin: 0 0 10px 0;
+      }
+      .api-key-status.ready {
+        color: #2ed573;
+      }
 
       /* --- แถบเครื่องมือ (Toolbar) --- */
       #toolbar {
@@ -473,6 +496,24 @@
         ให้ AI ปรับจูนความเร็วพัดลม (Blower) และระบบพ่นน้ำตามสถานการณ์จริง
       </p>
       <input
+        type="password"
+        id="gemini-api-key"
+        class="ai-input"
+        placeholder="วาง Gemini API Key ที่นี่"
+        autocomplete="off"
+      />
+      <div class="api-key-actions">
+        <button id="btn-save-api-key" class="btn-ai btn-api-key">
+          บันทึก API Key
+        </button>
+        <button id="btn-clear-api-key" class="btn-ai btn-api-key secondary">
+          ล้าง
+        </button>
+      </div>
+      <p id="api-key-status" class="api-key-status">
+        ยังไม่ได้ตั้งค่า Gemini API Key
+      </p>
+      <input
         type="text"
         id="ai-mess-input"
         class="ai-input"
@@ -524,12 +565,188 @@
       // ==========================================
       // Gemini API Configuration
       // ==========================================
-      const apiKey = ""; // API Key
+      const GEMINI_API_KEY_STORAGE = "cleaner-robot-gemini-api-key";
+      const GEMINI_MODEL = "gemini-2.5-flash";
+      let apiKey = localStorage.getItem(GEMINI_API_KEY_STORAGE) || "";
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const apiKeyInput = document.getElementById("gemini-api-key");
+      const btnSaveApiKey = document.getElementById("btn-save-api-key");
+      const btnClearApiKey = document.getElementById("btn-clear-api-key");
+      const apiKeyStatus = document.getElementById("api-key-status");
+
+      function syncApiKeyFromInput() {
+        apiKey = apiKeyInput.value.trim();
+        updateApiKeyStatus();
+        return apiKey;
+      }
+
+      function updateApiKeyStatus() {
+        const hasApiKey = Boolean(apiKey.trim());
+        apiKeyStatus.textContent = hasApiKey
+          ? "พร้อมใช้งาน Gemini API Key แล้ว"
+          : "ยังไม่ได้ตั้งค่า Gemini API Key";
+        apiKeyStatus.classList.toggle("ready", hasApiKey);
+      }
+
+      function saveApiKey() {
+        const nextApiKey = syncApiKeyFromInput();
+        if (nextApiKey) {
+          localStorage.setItem(GEMINI_API_KEY_STORAGE, nextApiKey);
+        } else {
+          localStorage.removeItem(GEMINI_API_KEY_STORAGE);
+        }
+        updateApiKeyStatus();
+      }
+
+      function clearApiKey() {
+        apiKey = "";
+        apiKeyInput.value = "";
+        localStorage.removeItem(GEMINI_API_KEY_STORAGE);
+        updateApiKeyStatus();
+      }
+
+      apiKeyInput.value = apiKey;
+      updateApiKeyStatus();
+      btnSaveApiKey.addEventListener("click", saveApiKey);
+      btnClearApiKey.addEventListener("click", clearApiKey);
+      apiKeyInput.addEventListener("input", syncApiKeyFromInput);
+      apiKeyInput.addEventListener("change", saveApiKey);
+
+      function escapeHtml(value) {
+        return String(value ?? "").replace(
+          /[&<>"']/g,
+          (char) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[char],
+        );
+      }
+
+      function formatErrorMessage(error, fallbackMessage) {
+        if (error instanceof Error && error.message) {
+          return error.message;
+        }
+        return fallbackMessage;
+      }
+
+      function getGeminiErrorMessage(data, response) {
+        const apiMessage = data?.error?.message;
+        if (typeof apiMessage === "string" && apiMessage.trim()) {
+          return apiMessage.trim();
+        }
+
+        const blockReason =
+          data?.promptFeedback?.blockReason ||
+          data?.candidates?.[0]?.finishReason;
+        if (typeof blockReason === "string" && blockReason.trim()) {
+          return `API ไม่ส่งเนื้อหากลับมา (${blockReason.trim()})`;
+        }
+
+        return `HTTP ${response.status} ${response.statusText}`.trim();
+      }
+
+      function extractGeminiText(data) {
+        const parts = data?.candidates?.flatMap(
+          (candidate) => candidate?.content?.parts || [],
+        );
+
+        const text = (parts || [])
+          .map((part) => (typeof part?.text === "string" ? part.text : ""))
+          .join("")
+          .trim();
+
+        if (text) return text;
+
+        const fallbackText = data?.text;
+        if (typeof fallbackText === "string" && fallbackText.trim()) {
+          return fallbackText.trim();
+        }
+
+        throw new Error("API ตอบกลับมา แต่ไม่พบข้อความใน response");
+      }
+
+      function extractGeminiJSON(data) {
+        const text = extractGeminiText(data);
+
+        try {
+          return JSON.parse(text);
+        } catch (parseError) {
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+          }
+
+          throw new Error(
+            `API ตอบกลับมา แต่ JSON ไม่ถูกต้อง: ${parseError.message}`,
+          );
+        }
+      }
+
+      function normalizeCleaningSettings(data) {
+        const blowerSpeed = Number(data?.blowerSpeed);
+        const brushSpeed = Number(data?.brushSpeed);
+        const waterPump =
+          typeof data?.waterPump === "string"
+            ? data.waterPump.toLowerCase() === "true"
+            : Boolean(data?.waterPump);
+        const explanation = String(data?.explanation ?? "").trim();
+
+        if (!Number.isFinite(blowerSpeed)) {
+          throw new Error("API ตอบกลับมา แต่ไม่มีค่า blowerSpeed ที่ใช้งานได้");
+        }
+
+        if (!Number.isFinite(brushSpeed)) {
+          throw new Error("API ตอบกลับมา แต่ไม่มีค่า brushSpeed ที่ใช้งานได้");
+        }
+
+        if (!explanation) {
+          throw new Error("API ตอบกลับมา แต่ไม่มีคำอธิบาย explanation");
+        }
+
+        return {
+          blowerSpeed,
+          brushSpeed,
+          waterPump,
+          explanation,
+        };
+      }
+
+      async function callGeminiAPI(payload, retries = 5) {
+        syncApiKeyFromInput();
+        if (!apiKey.trim()) {
+          throw new Error("ยังไม่ได้ตั้งค่า Gemini API Key");
+        }
+
+        const delays = [1000, 2000, 4000, 8000, 16000];
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+
+        for (let i = 0; i < retries; i++) {
+          try {
+            const response = await fetch(url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            const rawText = await response.text();
+            const data = rawText ? JSON.parse(rawText) : {};
+
+            if (!response.ok || data?.error) {
+              throw new Error(getGeminiErrorMessage(data, response));
+            }
+
+            return data;
+          } catch (error) {
+            if (i === retries - 1) throw error;
+            await sleep(delays[i]);
+          }
+        }
+      }
 
       async function fetchGeminiText(prompt, retries = 5) {
-        const delays = [1000, 2000, 4000, 8000, 16000];
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
         const payload = {
           contents: [{ parts: [{ text: prompt }] }],
           systemInstruction: {
@@ -540,27 +757,11 @@
             ],
           },
         };
-
-        for (let i = 0; i < retries; i++) {
-          try {
-            const response = await fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            });
-            if (!response.ok) throw new Error(`HTTP status ${response.status}`);
-            const data = await response.json();
-            return data.candidates[0].content.parts[0].text;
-          } catch (error) {
-            if (i === retries - 1) throw error;
-            await sleep(delays[i]);
-          }
-        }
+        const data = await callGeminiAPI(payload, retries);
+        return extractGeminiText(data);
       }
 
       async function fetchGeminiJSON(prompt, retries = 5) {
-        const delays = [1000, 2000, 4000, 8000, 16000];
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
         const payload = {
           contents: [{ parts: [{ text: prompt }] }],
           systemInstruction: {
@@ -601,22 +802,8 @@
             },
           },
         };
-
-        for (let i = 0; i < retries; i++) {
-          try {
-            const response = await fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            });
-            if (!response.ok) throw new Error(`HTTP status ${response.status}`);
-            const data = await response.json();
-            return JSON.parse(data.candidates[0].content.parts[0].text);
-          } catch (error) {
-            if (i === retries - 1) throw error;
-            await sleep(delays[i]);
-          }
-        }
+        const data = await callGeminiAPI(payload, retries);
+        return extractGeminiJSON(data);
       }
 
       let targetBlowerSpeed = 0.8;
@@ -1280,6 +1467,11 @@
             `อธิบายการทำงานและวิธีบำรุงรักษา ${currentComponent} ของหุ่นยนต์ดูดฝุ่น`,
           );
           aiResponseDiv.innerHTML = `<strong>✨ AI แนะนำ:</strong><br>${aiResult.replace(/\n/g, "<br>")}`;
+          const safeAiResult = escapeHtml(aiResult).replace(/\n/g, "<br>");
+          aiResponseDiv.innerHTML = aiResponseDiv.innerHTML.replace(
+            aiResult.replace(/\n/g, "<br>"),
+            safeAiResult,
+          );
           aiResponseDiv.style.display = "block";
           btnAskAI.style.display = "none";
         } catch (error) {
@@ -1339,7 +1531,7 @@
 
         try {
           const prompt = `สถานการณ์บนพื้น: ${inputMess.value}`;
-          const data = await fetchGeminiJSON(prompt);
+          const data = normalizeCleaningSettings(await fetchGeminiJSON(prompt));
 
           targetBlowerSpeed = data.blowerSpeed;
           targetBrushSpeed = data.brushSpeed;
@@ -1354,10 +1546,17 @@
                                        🧹 แปรงปัด: ${(data.brushSpeed * 100).toFixed(0)}%<br>
                                        💧 ปั๊มน้ำสเปรย์: ${data.waterPump ? '<span style="color:#2ed573">ทำงาน</span>' : '<span style="color:#ff4757">ปิด</span>'}<br>
                                        <br><span style="color:#a29bfe">💬 ${data.explanation}</span>`;
+          resultDiv.innerHTML = resultDiv.innerHTML.replace(
+            data.explanation,
+            escapeHtml(data.explanation),
+          );
           resultDiv.style.display = "block";
         } catch (err) {
           resultDiv.innerHTML =
             "⚠️ เกิดข้อผิดพลาดในการวิเคราะห์ กรุณาลองคำอื่น";
+          resultDiv.innerHTML = `⚠️ เกิดข้อผิดพลาดในการวิเคราะห์<br><span style="color:#ffb3b3">${escapeHtml(
+            formatErrorMessage(err, "กรุณาลองคำอื่น"),
+          )}</span>`;
           resultDiv.style.display = "block";
         } finally {
           btnOptimize.disabled = false;
